@@ -13,8 +13,11 @@ This is about **computer network traffic** (bytes between routers), not road tra
 - **Seasonal inputs** (each flow's mean at the same time on the last 7 days) are what the model was
   missing: on Abilene they raise the test gain over persistence at 5 minutes from +1.1% to **+7.1%**,
   and to **+8-12%** at 5-60 minutes on 143 of 144 flows (section 20).
-- One bursty flow (LOSA to CHIN), far outside its training range in the test period, decides most
-  rankings; robust handling of such out-of-range bursts is the open problem.
+- One bursty flow (LOSA to CHIN) cancels most of that gain at 30-60 minutes: during its bursts the
+  seasonal term pulls the forecast back to normal. A simple rule (use persistence for a flow when it is
+  more than 5 standard deviations from its seasonal level) fixes it: **+8-11% over persistence at 5-60
+  minutes**, significantly better than the model without seasonal inputs (section 21). A learned gate
+  could not do the same, because the training period has no bursts like these.
 - Link-level early warning is not yet better than reacting to the current load (sections 16-17).
 
 The full, plain-language record of every phase, decision and result is in
@@ -85,6 +88,7 @@ RAM; with WSL's default memory limit, run at most two at once.
 | `scripts/05_errors.py` | Phase 7: error analysis |
 | `scripts/06_baselines2.py` | Phase 8: seasonal, blend, ridge and multi-step ARIMA baselines; significance tests |
 | `scripts/07_features.py` | Phase 9: time of day, seasonal inputs, longer windows |
+| `scripts/08_peaks.py` | Phase 10: bursts (fallback rule, learned seasonal gate); run on the GPU |
 | `scripts/wsl/` | GPU helpers for WSL2 and the Phase 9 checks |
 | `results/metrics.csv` | Every logged run |
 | `results/figures/` | All figures |

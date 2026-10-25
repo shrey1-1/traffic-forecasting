@@ -2,7 +2,7 @@
 
 **Project:** CNN-LSTM Based Network Traffic Forecasting (with proactive congestion avoidance)
 **Last updated:** 25 October 2026
-**Current stage:** Improvement phases. Phase 8 (stronger baselines) and Phase 9 (better inputs) done, sections 19-20. Phases 10-12 not started.
+**Current stage:** Improvement phases. Phases 8-10 done (sections 19-21). Phases 11-12 not started.
 
 This document records, in simple terms, what has been built so far, why, and what is still left.
 It is updated at the end of each phase.
@@ -37,7 +37,8 @@ This is about **computer network traffic** (bytes between routers), not road tra
 | 7 Consolidation | Error analysis, report, presentation | Error analysis **done** (section 18); report and presentation not started |
 | 8 Stronger baselines | Seasonal, blend, ridge, multi-step ARIMA; significance tests | **Done** (section 19) |
 | 9 Better inputs | Time of day, seasonal values, longer window (trained on the GPU) | **Done** (section 20) |
-| 10-12 | Peaks, early warning redone, robustness | Not started |
+| 10 Peaks and bursts | Keep the seasonal gain without the loss in bursts (fallback rule, learned gate) | **Done** (section 21) |
+| 11-12 | Early warning redone (with 90th-percentile forecasts), robustness | Not started |
 
 **Results so far:** the CNN-LSTM beats persistence by a small amount that is statistically significant at
 5-30 minutes on Abilene and at both horizons on GÉANT (section 19); see section 18.5 for the main findings.
@@ -1003,3 +1004,64 @@ targets it keeps (100% on GÉANT). Selection on validation only.
 `common.py`: `time_features`, `segment_ids`, `context_dataset`, `model_inputs`; the model builders take `n_context`
 and `seasonal` (per-flow `DepthwiseConv1D` blend, initialised at zero so every model still starts as persistence).
 `scripts/07_features.py`; `scripts/wsl/` (GPU helpers, `verify_p9.py`); figure `07_features.png`; 78 models `p9g_*`.
+
+---
+
+## 21. Phase 10: peaks and bursts (`08_peaks.py`, GPU)
+
+### 21.1 Diagnosis: why the seasonal model loses on LOSA to CHIN
+Phase 9's seasonal model is 75-106% worse than persistence on flow 86 at 30-60 min. Splitting its extra error:
+- steps whose input is above the training maximum (0.5% of the flow's test steps): only **10-14%** of the extra error;
+- steps where the flow is more than 4 training standard deviations away from its seasonal level (2.5% of its
+  steps): **91-100%** of the extra error.
+So the problem is not out-of-range inputs as such but **bursts**: when a flow is far from its usual level for that
+time of day, the seasonal term pulls the forecast back to normal, while the burst persists.
+**Note:** this diagnosis looked at test results (it compared simple fallback rules on test). To keep Phase 10
+honest, nothing below was tuned on test: the rule's threshold is chosen on validation by a rule fixed in advance,
+and the learned gate is trained on the training data only.
+
+### 21.2 What was tried
+- **Fallback rule** (no training): use persistence for a flow at a step when |seasonal - last| is more than k
+  training standard deviations of that flow; k from 3, 4, 5, 6, 8 chosen on validation (largest gain; within 0.05%
+  of the best the smaller, more cautious k wins). Chosen: k = 5 on Abilene (applied to 0.3% of forecasts), k = 3 on GÉANT.
+- **Learned gate**: the seasonal term is multiplied by sigmoid(a - b z), z = |seasonal - last| / sd, with a and b
+  learned from the training data (2 numbers shared by all flows), starting almost open. 15 new models (`p10g_*`).
+
+### 21.3 Results (test MAE change vs persistence, 3-seed mean forecast)
+
+| | Abilene 5 min | Abilene 30 min | Abilene 60 min | GÉANT 15 min | GÉANT 60 min |
+|---|---|---|---|---|---|
+| base (no seasonal) | +1.1% | +0.8% | +1.1% | +0.7% | +3.1% |
+| seasonal (Phase 9) | +7.1% | +0.1% | +2.9% | -0.4% | +4.1% |
+| **seasonal + fallback rule** | **+7.7%** | **+8.1%** | **+10.8%** | +0.6% | +4.6% |
+| seasonal + learned gate | +6.9% | +1.2% | +2.4% | -0.4% | +4.3% |
+| flow 86 only: seasonal / rule | -10% / -1% | -106% / -9% | -79% / 0% | | |
+| peak bias: persistence / base / rule | -4.8 / -5.7 / -6.5% | -11.3 / -15.4 / -19.5% | -14.9 / -21.6 / -24.6% | | |
+
+Significance (Diebold-Mariano, 95% block bootstrap): the **rule beats the base CNN-LSTM by +6.7 / +7.3 / +9.8% on
+Abilene (all p < 0.001, intervals [+6.2, +7.3], [+5.9, +8.5], [+8.3, +11.1])** and by +1.5% on GÉANT 60 min (p < 0.001).
+Against the Phase 9 seasonal model the rule's gain is not significant (p = 0.22-0.26): it comes from a few burst days
+of one flow, which a day-block bootstrap cannot pin down.
+
+### 21.4 What this means
+- **With a fallback rule, the seasonal CNN-LSTM is 8-11% better than persistence on Abilene at 5-60 minutes,** about
+  7-10 times the Phase 4-6 gain, and significantly better than the model without seasonal inputs. The rule touches
+  only 0.3% of forecasts.
+- **The learned gate did not work, and the reason is a finding in itself:** it learned to stay open (it would only
+  half-close at 58-82 standard deviations). In the training period, pulling a far-off flow back to its seasonal level
+  *helps*, because training bursts are short and revert. The long LOSA to CHIN bursts of the test period are a new
+  kind of behaviour with no examples in training, so no model trained on that data can learn to handle them. A fixed
+  rule encodes the prior "trust persistence in a burst" that the data cannot teach.
+- **Caveats (important for the report):** (1) the rule's form came from a diagnosis that looked at test; (2) validation
+  cannot tell k = 5 from k = 6 or 8 (all within 0.05%), but on test k = 6 would have failed at 30 min (+0.1%), so the
+  result rests on a threshold validation could not really choose and on one flow's bursts in one test period.
+  Phase 12's rolling-origin evaluation (other test periods) is the way to check whether it holds.
+- **Peaks are still under-forecast** more than by persistence (e.g. -24.6% vs -14.9% bias at 60 min): the rule removes
+  the worst burst errors but the model still pulls ordinary peaks towards typical levels.
+- **GÉANT:** seasonal inputs still do not help clearly; the rule (k = 3) gives +4.6% vs +3.1% for the base at 60 min.
+- **Not tried in Phase 10:** a peak-weighted loss and an ARIMA + network combination (section 19.2). Quantile
+  (90th-percentile) forecasts move to Phase 11, where the early-warning work uses them.
+
+### 21.5 Files added
+`common.py`: `_seasonal_gate_class` (the gate layer, saved with the model), `build_cnn_lstm(gate_sd=)`, `load_saved`
+(loads a model with the project's custom layers). `scripts/08_peaks.py`; figure `08_peaks.png`; 15 models `p10g_*`.

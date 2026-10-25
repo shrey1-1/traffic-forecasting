@@ -947,7 +947,49 @@ def model_inputs(d, i, rows=slice(None)):
 # ---------------------------------------------------------------------------
 # Models (TensorFlow is imported inside, so scripts without models stay fast)
 # ---------------------------------------------------------------------------
-def _output(inp, x, n_flows, residual, name, n_context=0, seasonal=False):
+def _seasonal_gate_class():
+    """Keras layer for Phase 10 (built lazily so TensorFlow is only imported when needed).
+
+    gate = sigmoid(a - b * |seasonal(t) - last| / sd_f), one value per flow and sample, where
+    sd_f is that flow's spread of (seasonal(t) - last) in training (fixed, not trained) and a, b
+    are two learned numbers shared by all flows (b kept >= 0). The seasonal blend is multiplied
+    by the gate: near 1 when a flow is close to its usual level, falling towards 0 when it is far
+    from it (a burst), where pulling it back to the seasonal level is wrong. Starts almost open
+    (a = 4, b ~ 0.13), so the model begins as the Phase 9 seasonal model and learns the gate.
+    """
+    global _SeasonalGate
+    if "_SeasonalGate" in globals():
+        return _SeasonalGate
+    import tensorflow as tf
+
+    @tf.keras.utils.register_keras_serializable(package="traffic")
+    class SeasonalGate(tf.keras.layers.Layer):
+        def __init__(self, sd=None, **kw):
+            super().__init__(**kw)
+            self.sd_init = None if sd is None else [float(v) for v in np.asarray(sd).ravel()]
+
+        def build(self, shapes):
+            n = shapes[0][-1]
+            sd = self.sd_init if self.sd_init is not None else [1.0] * n
+            self.sd = self.add_weight(name="sd", shape=(n,), trainable=False,
+                                      initializer=tf.keras.initializers.Constant(sd))
+            self.a = self.add_weight(name="a", shape=(), initializer=tf.keras.initializers.Constant(4.0))
+            self.b_raw = self.add_weight(name="b_raw", shape=(), initializer=tf.keras.initializers.Constant(-2.0))
+
+        def call(self, inputs):
+            seas, blend = inputs                         # seas (n, 2, F), blend (n, F)
+            z = tf.abs(seas[:, 0, :]) / tf.maximum(self.sd, 1e-6)
+            gate = tf.sigmoid(self.a - tf.nn.softplus(self.b_raw) * z)
+            return blend * gate
+
+        def get_config(self):
+            return {**super().get_config(), "sd": self.sd_init}
+
+    _SeasonalGate = SeasonalGate
+    return SeasonalGate
+
+
+def _output(inp, x, n_flows, residual, name, n_context=0, seasonal=False, gate_sd=None):
     """Final Dense(n_flows) layer, optionally residual.
 
     residual=False: the Dense layer predicts the next value directly (the plan).
@@ -962,6 +1004,9 @@ def _output(inp, x, n_flows, residual, name, n_context=0, seasonal=False):
                    at the last input time, minus the last value. Each flow gets its own two
                    weights and bias (a per-flow blend, as the Phase 8 baseline), added to the
                    correction. Starts at zero, so the model is still persistence before training.
+    gate_sd        (Phase 10, with seasonal) per-flow training spread of seasonal(t) - last; the
+                   seasonal term is scaled down when a flow is far from its usual level (see
+                   _seasonal_gate_class).
     """
     from tensorflow.keras import layers, models
     inputs = [inp]
@@ -978,8 +1023,10 @@ def _output(inp, x, n_flows, residual, name, n_context=0, seasonal=False):
         return models.Model(inp, layers.Dense(n_flows)(x), name=name)
     correction = layers.Dense(n_flows, kernel_initializer="zeros", name="correction")(x)
     if seasonal:
-        blend = layers.DepthwiseConv1D(2, depthwise_initializer="zeros", name="seasonal_blend")(seas)
-        correction = layers.Add(name="correction_plus_seasonal")([correction, layers.Flatten()(blend)])
+        blend = layers.Flatten()(layers.DepthwiseConv1D(2, depthwise_initializer="zeros", name="seasonal_blend")(seas))
+        if gate_sd is not None:                          # Phase 10: switch the seasonal term off in bursts
+            blend = _seasonal_gate_class()(sd=gate_sd, name="seasonal_gate")([seas, blend])
+        correction = layers.Add(name="correction_plus_seasonal")([correction, blend])
     window = inp.shape[1]
     last = layers.Flatten(name="last_step")(layers.Cropping1D((window - 1, 0))(inp))
     return models.Model(inputs if len(inputs) > 1 else inp,
@@ -1015,11 +1062,11 @@ def build_cnn(window=WINDOW, n_flows=N_FLOWS, filters=64, kernel=3, dropout=0.2,
 
 def build_cnn_lstm(window=WINDOW, n_flows=N_FLOWS, filters=64, kernel=3,
                    units=(100, 50), dropout=0.2, residual=False, n_conv=2, pool=True, n_context=0,
-                   seasonal=False):
+                   seasonal=False, gate_sd=None):
     """The planned hybrid: causal Conv1D x2 -> MaxPooling -> LSTM x2 -> Dropout -> Dense.
 
     n_conv, pool and len(units) exist for the Phase 5 ablations (remove one part).
-    n_context, seasonal: extra inputs (Phase 9), see _output.
+    n_context, seasonal: extra inputs (Phase 9); gate_sd: seasonal gate (Phase 10); see _output.
     """
     from tensorflow.keras import layers
     x = inp = layers.Input(shape=(window, n_flows))
@@ -1030,7 +1077,7 @@ def build_cnn_lstm(window=WINDOW, n_flows=N_FLOWS, filters=64, kernel=3,
     for i, u in enumerate(units):
         x = layers.LSTM(u, return_sequences=i < len(units) - 1)(x)
     x = layers.Dropout(dropout)(x)
-    return _output(inp, x, n_flows, residual, "cnn_lstm", n_context, seasonal)
+    return _output(inp, x, n_flows, residual, "cnn_lstm", n_context, seasonal, gate_sd)
 
 
 def make_loss(kind, scaler=None, ref=None):
@@ -1111,7 +1158,7 @@ def fit_or_load(build_fn, name, X_train, y_train, X_val, y_val, retrain=False, s
     import tensorflow as tf
     path, hpath = MODELS / f"{name}.keras", MODELS / f"{name}_history.json"
     if not retrain and path.exists() and hpath.exists():
-        model = tf.keras.models.load_model(path, compile=False)   # only used to predict
+        model = load_saved(name)                                 # only used to predict
         history = json.loads(hpath.read_text())
         print(f"  loaded saved model {path.name} ({len(history['loss'])} epochs, "
               f"best val_loss {min(history['val_loss']):.5f}); set RETRAIN = True to train again")
@@ -1121,6 +1168,13 @@ def fit_or_load(build_fn, name, X_train, y_train, X_val, y_val, retrain=False, s
     history = train_model(model, name, X_train, y_train, X_val, y_val, **train_args)
     hpath.write_text(json.dumps(history))
     return model, history, True
+
+
+def load_saved(name):
+    """Load models/<name>.keras for prediction (registers the project's custom layers first)."""
+    import tensorflow as tf
+    _seasonal_gate_class()
+    return tf.keras.models.load_model(MODELS / f"{name}.keras", compile=False)
 
 
 def predict(model, X, batch_size=1024, scaler=None, max_raw=None):
@@ -1501,7 +1555,7 @@ __all__ = [
     "make_loss", "train_model", "fit_or_load", "predict",
     "STEPS_PER_DAY", "clean_timeline", "lookback", "seasonal_mean", "ridge_path", "dm_test",
     "block_bootstrap_gain", "saved_model_names", "data_dir", "MAX_FLOW_RAW",
-    "time_features", "segment_ids", "context_dataset", "model_inputs",
+    "time_features", "segment_ids", "context_dataset", "model_inputs", "load_saved",
 ]
 
 if __name__ == "__main__":
