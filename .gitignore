@@ -1,0 +1,23 @@
+# environment
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# data and outputs that are regenerated (see README: Data)
+raw/*
+raw_geant/
+processed/*
+models/*
+!raw/.gitkeep
+!processed/.gitkeep
+!models/.gitkeep
+
+# output pages and run logs, rebuilt on every run
+results/reports/
+results/report.html
+results/*.log
+
+# unrelated scratch files from other editors / courses
+tempCodeRunnerFile.*
+*.exe

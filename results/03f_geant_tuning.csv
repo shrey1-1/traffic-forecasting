@@ -1,0 +1,17 @@
+label,model,seed,val_mae_mbit,val_vs_pers_pct,test_mae_mbit,test_vs_pers_pct,epochs,best_epoch,seconds
+base (03e settings),g_h4_cnn_lstm_s42,42,2.7758,2.75,,,18,3,1
+lr=0.0003,gt_h4_cnn_lstm_f64_k3_u100-50_d20_lr0.0003_s42,42,2.7679,3.02,,,24,9,18
+lr=0.0001,gt_h4_cnn_lstm_f64_k3_u100-50_d20_lr0.0001_s42,42,2.7675,3.04,,,22,7,16
+lr=0.003,gt_h4_cnn_lstm_f64_k3_u100-50_d20_lr0.003_s42,42,2.8086,1.6,,,22,7,16
+dropout=0.4,gt_h4_cnn_lstm_f64_k3_u100-50_d40_lr0.001_s42,42,2.7619,3.23,,,23,8,17
+dropout=0.5,gt_h4_cnn_lstm_f64_k3_u100-50_d50_lr0.001_s42,42,2.7645,3.14,,,19,4,14
+dropout=0.0,gt_h4_cnn_lstm_f64_k3_u100-50_d0_lr0.001_s42,42,2.7787,2.64,,,19,4,13
+"units=(64, 32)",gt_h4_cnn_lstm_f64_k3_u64-32_d40_lr0.001_s42,42,2.7682,3.01,,,23,8,14
+"units=(128, 64)",gt_h4_cnn_lstm_f64_k3_u128-64_d40_lr0.001_s42,42,2.7699,2.95,,,18,3,15
+filters=32,gt_h4_cnn_lstm_f32_k3_u100-50_d40_lr0.001_s42,42,2.7692,2.97,,,21,6,13
+filters=128,gt_h4_cnn_lstm_f128_k3_u100-50_d40_lr0.001_s42,42,2.7717,2.89,,,24,9,22
+kernel=2,gt_h4_cnn_lstm_f64_k2_u100-50_d40_lr0.001_s42,42,2.7852,2.42,,,23,8,17
+kernel=5,gt_h4_cnn_lstm_f64_k5_u100-50_d40_lr0.001_s42,42,2.7692,2.97,,,19,4,16
+final seed 42,gt_h4_cnn_lstm_f64_k3_u100-50_d40_lr0.001_s42,42,2.7619,3.23,2.306,2.98,23,8,1
+final seed 43,gt_h4_cnn_lstm_f64_k3_u100-50_d40_lr0.001_s43,43,2.785,2.42,2.3262,2.13,22,7,17
+final seed 44,gt_h4_cnn_lstm_f64_k3_u100-50_d40_lr0.001_s44,44,2.7556,3.45,2.301,3.19,19,4,14
