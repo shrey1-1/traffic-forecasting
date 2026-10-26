@@ -937,6 +937,54 @@ def context_dataset(dataset, horizon, window=WINDOW, seasonal=None, use_time=Fal
     return out
 
 
+def fold_dataset(dataset, horizon, split, seasonal=None):
+    """Like context_dataset (window 12), but with a different chronological split (Phase 12).
+
+    split = (a, b, c) fractions of the time-ordered samples: train [0, a), val [a, b), test [b, c).
+    The samples are exactly the Phase 1 / Phase 6 ones (same targets, windows never cross a gap);
+    the inputs are rebuilt from the cleaned timeline in original units, and a NEW scaler is fitted on
+    this fold's training inputs only. Seasonal inputs, if asked for, are built as in context_dataset.
+    """
+    steps = np.load(data_dir(dataset, horizon) / "target_steps.npy")
+    values, known, to_time = clean_timeline(dataset)
+    day = STEPS_PER_DAY[dataset]
+    t_all = to_time[steps]
+    n = len(t_all)
+    a, b, c = (int(f * n) for f in split)
+    bounds = [(0, a), (a, b), (b, c)]
+    first = t_all - horizon - WINDOW + 1
+    if not known[(first[:, None] + np.arange(WINDOW)).ravel()].all():
+        raise ValueError("a window touches an unknown step")
+    tr_rows = first[:a][:, None] + np.arange(WINDOW)
+    sc = FlowScaler().fit(values[np.unique(tr_rows)])         # every step that appears in a training input
+    out = {"X": [], "C": [], "S": [], "y": [], "y_raw": [], "last_raw": [], "kept": [], "times": [],
+           "scaler": sc, "split": split}
+    for lo, hi in bounds:
+        t = t_all[lo:hi]
+        rows = first[lo:hi][:, None] + np.arange(WINDOW)
+        X = np.empty((len(rows), WINDOW, values.shape[1]), np.float32)
+        for k in range(0, len(rows), 2048):
+            X[k:k + 2048] = sc.transform(values[rows[k:k + 2048]])
+        last_raw = values[t - horizon].astype(np.float64)
+        S = None
+        if seasonal:
+            parts = []
+            for when in (t, t - horizon):
+                s = (lookback(values, known, when, day) if seasonal == "seasonal_day"
+                     else seasonal_mean(values, known, when, day, 7))
+                parts.append(sc.transform(np.where(np.isnan(s), last_raw, s)) - X[:, -1])
+            S = np.stack(parts, 1).astype(np.float32)
+        out["X"].append(X)
+        out["C"].append(None)
+        out["S"].append(S)
+        out["y"].append(sc.transform(values[t]))
+        out["y_raw"].append(values[t].astype(np.float64))
+        out["last_raw"].append(last_raw)
+        out["kept"].append(np.arange(lo, hi))
+        out["times"].append(t)
+    return out
+
+
 def model_inputs(d, i, rows=slice(None)):
     """What a Phase 9 model takes for split i (0 train, 1 val, 2 test) of a context_dataset:
     X alone, or [X, time features?, seasonal?] in the order _output expects."""
@@ -1555,7 +1603,7 @@ __all__ = [
     "make_loss", "train_model", "fit_or_load", "predict",
     "STEPS_PER_DAY", "clean_timeline", "lookback", "seasonal_mean", "ridge_path", "dm_test",
     "block_bootstrap_gain", "saved_model_names", "data_dir", "MAX_FLOW_RAW",
-    "time_features", "segment_ids", "context_dataset", "model_inputs", "load_saved",
+    "time_features", "segment_ids", "context_dataset", "model_inputs", "load_saved", "fold_dataset",
 ]
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 **Project:** CNN-LSTM Based Network Traffic Forecasting (with proactive congestion avoidance)
 **Last updated:** 25 October 2026
-**Current stage:** Improvement phases. Phases 8-10 done (sections 19-21). Phases 11-12 not started.
+**Current stage:** All improvement phases (8-12) done, sections 19-23; overall findings in section 24.
 
 This document records, in simple terms, what has been built so far, why, and what is still left.
 It is updated at the end of each phase.
@@ -38,7 +38,8 @@ This is about **computer network traffic** (bytes between routers), not road tra
 | 8 Stronger baselines | Seasonal, blend, ridge, multi-step ARIMA; significance tests | **Done** (section 19) |
 | 9 Better inputs | Time of day, seasonal values, longer window (trained on the GPU) | **Done** (section 20) |
 | 10 Peaks and bursts | Keep the seasonal gain without the loss in bursts (fallback rule, learned gate) | **Done** (section 21) |
-| 11-12 | Early warning redone (with 90th-percentile forecasts), robustness | Not started |
+| 11 Early warning redone | Better forecasts and calibrated 90th-percentile margins for warnings | **Done** (section 22) |
+| 12 Robustness | Rolling-origin evaluation, more seeds, error analysis rerun | **Done** (section 23) |
 
 **Results so far:** the CNN-LSTM beats persistence by a small amount that is statistically significant at
 5-30 minutes on Abilene and at both horizons on GÉANT (section 19); see section 18.5 for the main findings.
@@ -1065,3 +1066,131 @@ of one flow, which a day-block bootstrap cannot pin down.
 ### 21.5 Files added
 `common.py`: `_seasonal_gate_class` (the gate layer, saved with the model), `build_cnn_lstm(gate_sd=)`, `load_saved`
 (loads a model with the project's custom layers). `scripts/08_peaks.py`; figure `08_peaks.png`; 15 models `p10g_*`.
+
+---
+
+## 22. Phase 11: early warning, redone (`09_warnings.py`)
+
+### 22.1 Method
+Same events and scores as Phase 6 (Abilene: link utilisation at or above 50%, with 40% and 60% as sensitivity;
+GÉANT: link load in the top 10% of that link's training loads, approximate routing). Three forecasters, all mean of
+3 GPU seeds: persistence, the CNN-LSTM base, and Phase 10's seasonal model with the fallback rule (same k as Phase 10).
+Each warns on its **point** forecast and on a **high estimate**: forecast + a per-link margin equal to the 90th
+percentile of that link's validation errors (split-conformal calibration; level fixed in advance). This replaces the
+planned quantile networks: it gives a calibrated 90th-percentile forecast for every method, persistence included,
+without new training.
+
+### 22.2 Results (test, F1 at the primary threshold; point -> q90 high)
+
+| | persistence | CNN-LSTM base | seasonal + rule |
+|---|---|---|---|
+| Abilene 5 min | 0.97 -> 0.97 | 0.97 -> 0.97 | 0.97 -> 0.97 |
+| Abilene 30 min | 0.93 -> 0.93 | 0.94 -> 0.94 | 0.91 -> 0.91 |
+| Abilene 60 min | 0.90 -> 0.90 | 0.91 -> 0.91 | 0.89 -> 0.89 |
+| GÉANT 15 min | 0.84 -> 0.78 | 0.83 -> 0.78 | 0.83 -> 0.79 |
+| GÉANT 60 min | 0.76 -> 0.68 | 0.73 -> 0.67 | 0.74 -> 0.67 |
+
+Link-load MAE, test (persistence / base / seasonal + rule): Abilene 0.203 / 0.203 / 0.195 pp at 5 min, 0.381 / 0.386 /
+0.372 at 30 min, 0.494 / 0.503 / **0.453** at 60 min; GÉANT 9.13 / 9.33 / 9.32 and 15.96 / 16.12 / 15.91 Mbit/s.
+Persistence's numbers equal Phase 6's exactly.
+
+### 22.3 What this means
+- **Better forecasts do not give better warnings.** The seasonal model forecasts link loads up to 8% more accurately
+  (Abilene 60 min), but its warnings are no better than persistence anywhere; no Abilene F1 difference is clear in a
+  day-block bootstrap (e.g. 30 min: 0.91 vs 0.93, interval [-0.26, +0.04]). At 30-60 min it misses more congestion
+  (recall 0.85 vs 0.93): during LOSA to CHIN's episodes (which are nearly all the congestion, section 16.4) the
+  seasonal term still pulls flow 86 down whenever it is within 5 sd of its usual level.
+- **Warning on a high estimate does not change Abilene** (the margins are a fraction of a percentage point, far below
+  what moves a link across 50%; even the 99% level changes F1 by at most 0.01). On GÉANT it trades precision for
+  recall (recall 0.84 -> 0.95 at 15 min, onsets warned 0 -> about 1,450 of 2,130), but equally for persistence, so the
+  model gains nothing over it.
+- **Calibration check:** the true load is below the high estimate on 90-91% of GÉANT test link-steps (calibrated) but
+  only 82-87% on Abilene (the test period is burstier than validation, as everywhere in this project).
+- **Conclusion, confirming Phase 6 with stronger evidence:** on both networks, congestion here is a property of a few
+  long-lasting bursts whose starts are not predictable from the past hour or the past week. Once an episode has started,
+  reacting to the current load is already almost as good as any forecast. Forecasting improves the average error
+  (Phases 9-10) but not the decisions that matter for congestion.
+
+Files: `scripts/09_warnings.py`; figure `09_warnings.png`.
+
+---
+
+## 23. Phase 12: robustness (`10_robustness.py`, GPU)
+
+### 23.1 Rolling origin: does it hold in other test periods?
+The whole comparison was repeated on three earlier periods, each with its own chronological split (train =
+everything before validation), its own scaler, its own rule threshold (chosen on that fold's validation as in
+Phase 10) and 3 seeds per model (36 new models, `p12g_*_f*`). At 60 minutes, where the effects were largest.
+Test MAE change vs persistence:
+
+| Fold | Test period | base | seasonal | seasonal + rule (k) | rule vs base, 95% interval |
+|---|---|---|---|---|---|
+| Abilene original | 11 Aug - 10 Sep | +1.1% | +2.9% | **+10.8%** (5) | +9.8% [+8.3, +11.0], p < 0.001 |
+| Abilene A | 14 Jun - 6 Jul | +0.4% | +9.9% | **+8.7%** (8) | +8.3% [+7.4, +9.1], p < 0.001 |
+| Abilene B | 6 Jul - 28 Jul | +1.5% | +12.0% | **+12.0%** (8) | +10.7% [+9.0, +12.1], p < 0.001 |
+| Abilene C | 28 Jul - 11 Aug | +2.5% | +13.1% | **+13.1%** (6) | +10.9% [+9.4, +12.6], p < 0.001 |
+| GÉANT original | 7 Apr - 29 Apr | +3.1% | +4.1% | +4.6% (3) | +1.5% [+1.0, +2.0], p < 0.001 |
+| GÉANT A | 15 Feb - 9 Mar | -1.0% | -3.2% | -1.9% (5) | -0.8% [-4.4, +1.8], p = 0.59 |
+| GÉANT B | 9 Mar - 27 Mar | -6.1% | -3.9% | -2.9% (3) | +3.0% [+1.6, +4.4], p < 0.001 |
+| GÉANT C | 27 Mar - 7 Apr | +3.2% | +4.6% | +4.4% (3) | +1.2% [+0.8, +2.2], p < 0.001 |
+
+- **The Abilene result is robust.** Seasonal inputs give a 9-13% gain over persistence in every period, and the
+  seasonal model with the rule beats the CNN-LSTM without seasonal inputs by 8-11% in all four, each p < 0.001.
+- **The flow 86 problem was specific to the original test period.** In the earlier periods the seasonal model works
+  without the rule (+9.9 / +12.0 / +13.1%); validation picks a lax threshold (k = 6-8) and the rule changes little,
+  costing 1.2% in fold A. So the rule behaves as insurance: a small cost in calm periods, a large saving (2.9% -> 10.8%)
+  in the period with long bursts. This answers the caveat of section 21.4: the rule's benefit does not rest on one
+  period, although its threshold is still not well determined by validation.
+- **The CNN-LSTM without seasonal inputs gains only 0.4-2.5% on Abilene in any period**, confirming Phases 4-6.
+- **GÉANT is not robust.** With less training data (folds A and B train on 30-45% of an already short series, about
+  5-7 weeks), every neural model is worse than persistence in two of four periods (base -6.1% in fold B). The rule
+  helps relative to the base in three of four periods, but the overall GÉANT gains of Phases 6-11 do not carry to
+  every period. GÉANT needs more training data than it has for these models to be reliable.
+
+### 23.2 Ablations with 3 seeds (Abilene, test, change vs persistence; GPU)
+
+| Model | 5 min | 30 min | 60 min |
+|---|---|---|---|
+| full CNN-LSTM | +1.08% | +0.82% | +1.12% |
+| 1 conv layer | +0.33% | +0.77% | +1.20% |
+| no pooling | +0.60% | +0.75% | +1.18% |
+| 1 LSTM layer | +0.82% | +0.86% | +1.31% |
+
+Seed spread is about 0.3-0.5%. Only one difference stands out: one conv layer is worse at 5 minutes (+0.33% vs +1.08%,
+every seed lower). Otherwise removing a part changes nothing beyond noise. This confirms section 15.3 with 3 seeds:
+the architecture details matter far less than the inputs (Phase 9) and the loss (Phase 4).
+
+### 23.3 Error analysis rerun (as section 18)
+MAE change vs persistence by size of the true move (Abilene 60 min): base -15.1 / +2.6 / +4.5 / +7.3 / +5.8% from the
+smallest 50% of moves to the top 1%; **seasonal + rule -29.3 / +16.9 / +19.9 / +19.8 / +21.0%**. Damping (share of the
+move that is forecast): **0.006 -> 0.047 at 5 min, 0.029 -> 0.149 at 30 min, 0.051 -> 0.168 at 60 min**.
+- The seasonal model forecasts 15-17% of the move at 30-60 minutes instead of 3-5%: it now predicts a real part of where
+  traffic is going (towards its usual level for that time), not just "slightly different from now".
+- The price is larger on the smallest moves (it predicts a change where the value stays put), but the gains on the
+  50% of larger moves are 3-4 times bigger than before.
+- On GÉANT the picture barely changes (damping 0.049 -> 0.061 at 60 min), as expected from Phases 9-10.
+
+Files: `common.py` `fold_dataset`; `scripts/10_robustness.py`; figure `10_rolling_origin.png`; 63 models `p12g_*`.
+
+---
+
+## 24. Overall findings after Phases 8-12 (for the report)
+
+1. **Persistence is a strong baseline**, and architecture alone barely beats it: the CNN-LSTM, LSTM-only and CNN-only
+   gain 0.3-2.5% on Abilene in every test period, significant but small (sections 14-15, 19, 23).
+2. **What the model sees matters far more than its architecture.** Each flow's seasonal level (mean of the same time
+   on the last 7 days) raises the Abilene gain to **9-13% over persistence at 60 minutes in all four test periods**, and
+   the model then forecasts 15-17% of each move instead of 3-5% (sections 20, 23). Ablations change results by under 1%.
+3. **Seasonal knowledge is wrong during long bursts**, which pull the forecast back to normal. A fixed rule (use
+   persistence when a flow is more than about 5 standard deviations from its seasonal level) removes this loss where it
+   matters and costs little elsewhere. A learned gate cannot learn it, because training periods contain no long bursts
+   (sections 21, 23).
+4. **The loss function made the models work at all**: residual output plus MAE in original units (sections 13-14).
+5. **Better forecasts do not give better congestion warnings.** Congestion is a few long bursts whose onsets are not
+   predictable; once started, reacting to the current load is as good as forecasting, with or without calibrated
+   safety margins (sections 16-17, 22).
+6. **GÉANT results are fragile**: small gains in some periods, losses in others, because its series is short for these
+   models (sections 17, 23).
+7. **Method notes for the viva:** every choice was made on validation; results are 3-seed means with Diebold-Mariano and
+   day-block bootstrap tests; Phase 10's rule was motivated by a diagnosis that looked at test, which Phase 12's
+   rolling-origin evaluation then checked on three other periods.

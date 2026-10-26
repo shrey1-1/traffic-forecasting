@@ -8,17 +8,17 @@ This is about **computer network traffic** (bytes between routers), not road tra
 ## Main findings so far
 
 - A residual CNN-LSTM trained on MAE in original units beats persistence ("the next value equals the
-  last one") by a small but statistically significant margin: about 1% at 5-30 minutes on Abilene and
-  0.6-3% on GÉANT (Diebold-Mariano and block-bootstrap tests, `docs/PROJECT_LOG.md` section 19).
-- **Seasonal inputs** (each flow's mean at the same time on the last 7 days) are what the model was
-  missing: on Abilene they raise the test gain over persistence at 5 minutes from +1.1% to **+7.1%**,
-  and to **+8-12%** at 5-60 minutes on 143 of 144 flows (section 20).
-- One bursty flow (LOSA to CHIN) cancels most of that gain at 30-60 minutes: during its bursts the
-  seasonal term pulls the forecast back to normal. A simple rule (use persistence for a flow when it is
-  more than 5 standard deviations from its seasonal level) fixes it: **+8-11% over persistence at 5-60
-  minutes**, significantly better than the model without seasonal inputs (section 21). A learned gate
-  could not do the same, because the training period has no bursts like these.
-- Link-level early warning is not yet better than reacting to the current load (sections 16-17).
+  last one") by a small but statistically significant margin: 0.4-2.5% on Abilene in every test period
+  (Diebold-Mariano and block-bootstrap tests, `docs/PROJECT_LOG.md` sections 19 and 23).
+- **Seasonal inputs** (each flow's mean at the same time on the last 7 days) matter far more than the
+  architecture: on Abilene at 60 minutes they give **9-13% over persistence in all four test periods**
+  of a rolling-origin evaluation (sections 20 and 23).
+- During long bursts the seasonal term pulls forecasts back to normal; a simple rule (use persistence
+  for a flow more than about 5 standard deviations from its seasonal level) fixes this. A learned gate
+  could not, because training periods contain no long bursts (section 21).
+- Better forecasts do **not** give better congestion warnings: congestion comes from a few long bursts
+  whose onsets are unpredictable (sections 16, 17 and 22).
+- GÉANT results are fragile across periods (short series). Overall findings: section 24.
 
 The full, plain-language record of every phase, decision and result is in
 [`docs/PROJECT_LOG.md`](docs/PROJECT_LOG.md).
@@ -89,6 +89,8 @@ RAM; with WSL's default memory limit, run at most two at once.
 | `scripts/06_baselines2.py` | Phase 8: seasonal, blend, ridge and multi-step ARIMA baselines; significance tests |
 | `scripts/07_features.py` | Phase 9: time of day, seasonal inputs, longer windows |
 | `scripts/08_peaks.py` | Phase 10: bursts (fallback rule, learned seasonal gate); run on the GPU |
+| `scripts/09_warnings.py` | Phase 11: congestion warnings with calibrated 90th-percentile margins |
+| `scripts/10_robustness.py` | Phase 12: rolling-origin evaluation, 3-seed ablations, error analysis rerun |
 | `scripts/wsl/` | GPU helpers for WSL2 and the Phase 9 checks |
 | `results/metrics.csv` | Every logged run |
 | `results/figures/` | All figures |
